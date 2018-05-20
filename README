@@ -7,7 +7,10 @@ Python3 library to manipulate PasswordSafe V3 files
 Installation
 ============
 
-pwsafe.py depends on the twofish_ library
+To install ``pwsafe.py`` use pip as usual. Note that ``pwsafe.py``
+depends on the twofish_ library.
+
+.. code:: shell
 
    pip install https://github.com/marcogiusti/pwsafe.py
 
@@ -21,7 +24,7 @@ To write to a file, create a new PwsafeV3Writer with a file object and
 the passphrase and start writing records with the ``write_record``
 method. The V3 format file need an header and a series of records.
 
-::
+.. code:: python
 
    >>> import io
    >>> import pwsafe
@@ -45,7 +48,7 @@ remember to do it yourself.
 To read from a file, use the ``PwsafeV3Reader``. Let's reuse the file we
 already created.
 
-::
+.. code:: python
 
    >>> fp.seek(0)
    0
