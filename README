@@ -1,0 +1,64 @@
+=========
+pwsafe.py
+=========
+Python3 library to manipulate PasswordSafe V3 files
+---------------------------------------------------
+
+Installation
+============
+
+pwsafe.py depends on the twofish_ library
+
+   pip install https://github.com/marcogiusti/pwsafe.py
+
+.. _twofish: https://pypi.org/project/twofish/
+
+
+Usage
+=====
+
+To write to a file, create a new PwsafeV3Writer with a file object and
+the passphrase and start writing records with the ``write_record``
+method. The V3 format file need an header and a series of records.
+
+::
+
+   >>> import io
+   >>> import pwsafe
+   >>> fp = io.BytesIO()
+   >>> db_password = b'secret'
+   >>> writer = pwsafe.PwsafeV3Writer(fp, db_password)
+   >>> header = [pwsafe.Version(3), pwsafe.UUID.uuid4()]
+   >>> writer.write_record(header)
+   >>> uuid = pwsafe.UUID.uuid4()
+   >>> title = pwsafe.Title('Github account')
+   >>> url = pwsafe.Url('https://github.com')
+   >>> username = pwsafe.Username('marcogiusti')
+   >>> password = pwsafe.Password('qwerty')
+   >>> record = [uuid, title, username, password]
+   >>> writer.write_record(record)
+   >>> writer.close()
+
+``PwsafeV3Writer`` does not explicitely close file object it receaved,
+remember to do it yourself.
+
+To read from a file, use the ``PwsafeV3Reader``. Let's reuse the file we
+already created.
+
+::
+
+   >>> fp.seek(0)
+   0
+   >>> reader = pwsafe.PwsafeV3Reader(fp, db_password)
+   >>> header_read, *records = list(reader)
+   >>> header_read == header
+   True
+   >>> records == [record]
+   True
+
+
+
+   
+
+
+.. vim: ft=rst tw=72
