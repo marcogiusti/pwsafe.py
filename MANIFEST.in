@@ -1,4 +1,2 @@
-include Pipfile
-include Pipfile.lock
 include LICENSE
 include test/*.psafe3
