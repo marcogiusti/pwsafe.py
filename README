@@ -31,9 +31,9 @@ method. The V3 format file need an header and a series of records.
    >>> fp = io.BytesIO()
    >>> db_password = b'secret'
    >>> writer = pwsafe.PwsafeV3Writer(fp, db_password)
-   >>> header = [pwsafe.Version(3), pwsafe.UUID.uuid4()]
+   >>> header = [pwsafe.Version(3), pwsafe.UuidField.uuid4()]
    >>> writer.write_record(header)
-   >>> uuid = pwsafe.UUID.uuid4()
+   >>> uuid = pwsafe.UuidField.uuid4()
    >>> title = pwsafe.Title('Github account')
    >>> url = pwsafe.Url('https://github.com')
    >>> username = pwsafe.Username('marcogiusti')

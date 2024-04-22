@@ -1,2 +1,4 @@
 include LICENSE
 include test/*.psafe3
+include test/zero
+include-recursive stubs/*pyi

@@ -18,19 +18,38 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import os
-import abc
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 import datetime
 import hashlib
 import hmac
+import os
 import struct
+from types import TracebackType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    BinaryIO,
+    ClassVar,
+    NamedTuple,
+    Protocol,
+    runtime_checkable,
+)
 import uuid
-from collections import namedtuple
 
 import twofish
 
+if TYPE_CHECKING:
+    from hashlib import _Hash
+    from hmac import _DigestMod
+    from typing import Self
 
-__version__ = "0.2.0"
+    HashFunction = Callable[[bytes], _Hash]
+
+
+__version__ = "0.3.0"
 __author__ = "Marco Giusti"
 __license__ = "MIT"
 __all__ = (
@@ -43,7 +62,7 @@ __all__ = (
     "DigestError",
     # Header Fields
     "Version",
-    "UUID",
+    "UuidField",
     "NonDefaultPreferences",
     "TreeDisplayStatus",
     "LastSave",
@@ -91,7 +110,7 @@ __all__ = (
     "Unknown",
     # Miscellaneous
     "PwsafeV3Base",
-    "AField",
+    "Field",
     "RawField",
     "IntField",
     "TextField",
@@ -130,45 +149,66 @@ class _EOF(Exception):
     pass
 
 
-class Header(namedtuple("_Header", "tag salt iterations hp1 b1 b2 b3 b4 iv")):
+HEADER_STRUCT = struct.Struct("<4s32sI32s16s16s16s16s16s")
 
-    __slots__ = ()
-    struct = struct.Struct("<4s32sI32s16s16s16s16s16s")
+
+class Header(NamedTuple):
+    tag: bytes
+    salt: bytes
+    iterations: int
+    hp1: bytes
+    b1: bytes
+    b2: bytes
+    b3: bytes
+    b4: bytes
+    iv: bytes
 
     @classmethod
-    def from_file(cls, fp):
-        data = fp.read(cls.struct.size)
+    def from_file(cls, fp: BinaryIO) -> Self:
+        data = fp.read(HEADER_STRUCT.size)
         try:
             return cls.from_bytes(data)
         except struct.error:
             raise NotPwsafeV3("truncated file")
 
     @classmethod
-    def from_bytes(cls, data):
-        return cls._make(cls.struct.unpack(data))
+    def from_bytes(cls, data: bytes) -> Self:
+        return cls._make(HEADER_STRUCT.unpack(data))
 
-    def to_bytes(self):
-        return self.struct.pack(*self)
+    def to_bytes(self) -> bytes:
+        return HEADER_STRUCT.pack(*self)
 
 
-def xor_bytes(b1, b2):
+def xor_bytes(b1: bytes, b2: bytes) -> bytes:
     assert len(b1) == len(b2)
     return bytes(c1 ^ c2 for c1, c2 in zip(b1, b2))
 
 
+def stretch_key(
+    key: bytes, salt: bytes, iterations: int, _hash: HashFunction = hashlib.sha256
+) -> bytes:
+    x = _hash(key + salt).digest()
+    for i in range(iterations):
+        x = _hash(x).digest()
+    return x
+
+
 class PwsafeV3Base:
 
-    TAG = b"PWS3"
-    EOF = b"PWS3-EOFPWS3-EOF"  # 16 bytes
-    DIGESTMOD = hashlib.sha256
-    MIN_HASH_ITERATIONS = 2**11
+    TAG: bytes = b"PWS3"
+    EOF: bytes = b"PWS3-EOFPWS3-EOF"  # 16 bytes
+    DIGESTMOD: _DigestMod = hashlib.sha256
+    MIN_HASH_ITERATIONS: int = 2**11
 
-    def stretch_key(self, key, salt, iterations, _hash=hashlib.sha256):
+    def stretch_key(
+        self,
+        key: bytes,
+        salt: bytes,
+        iterations: int,
+        _hash: HashFunction = hashlib.sha256,
+    ) -> bytes:
         assert iterations >= self.MIN_HASH_ITERATIONS
-        x = _hash(key + salt).digest()
-        for i in range(iterations):
-            x = _hash(x).digest()
-        return x
+        return stretch_key(key, salt, iterations, _hash)
 
 
 class PwsafeV3Reader(PwsafeV3Base):
@@ -181,7 +221,7 @@ class PwsafeV3Reader(PwsafeV3Base):
     _should_close = False
 
     @classmethod
-    def is_pwsafe(cls, filename):
+    def is_pwsafe(cls, filename: str) -> bool:
         try:
             with cls.open(filename, b""):
                 pass
@@ -192,7 +232,7 @@ class PwsafeV3Reader(PwsafeV3Base):
         return True
 
     @classmethod
-    def open(cls, filename, key):
+    def open(cls, filename: str, key: bytes) -> Self:
         fp = open(filename, "rb")
         try:
             self = cls(fp, key)
@@ -202,11 +242,11 @@ class PwsafeV3Reader(PwsafeV3Base):
         self._should_close = True
         return self
 
-    def __init__(self, fp, key):
+    def __init__(self, fp: BinaryIO, key: bytes):
         self._fp = fp
         header = Header.from_file(fp)
         if header.tag != self.TAG:
-            raise NotPwsafeV3('invalid tag "%s"' % header.tag)
+            raise NotPwsafeV3(f"invalid tag {header.tag!r}")
         p1 = self.stretch_key(key, header.salt, header.iterations)
         if not hmac.compare_digest(hashlib.sha256(p1).digest(), header.hp1):
             raise InvalidPassword()
@@ -217,20 +257,25 @@ class PwsafeV3Reader(PwsafeV3Base):
         self._fishfish = twofish.Twofish(K)
         self._iv = header.iv
 
-    def __del__(self):
+    def __del__(self) -> None:
         if self._should_close:
             self.close()
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         self.close()
 
-    def close(self):
+    def close(self) -> None:
         self._fp.close()
 
-    def __iter__(self):
+    def __iter__(self) -> Iterable[list[Field]]:
         # header
         yield list(self._read_record(HEADERS_MAP))
         while 1:
@@ -240,18 +285,20 @@ class PwsafeV3Reader(PwsafeV3Base):
                 self._check_digest()
                 return
 
-    def _read_record(self, field_types):
+    def _read_record(self, field_types: dict[int, type[Field]]) -> Iterable[Field]:
         field = self._read_field(field_types)
         while field is not END:
             yield field
             field = self._read_field(field_types)
 
-    def _read_field(self, field_types, block_size=16):
+    def _read_field(
+        self, field_types: dict[int, type[Field]], block_size: int = 16
+    ) -> Field:
         first_block = self._read_block(block_size)
         length = int.from_bytes(first_block[:4], "little")
         # TODO: refactor
         if not 0 <= length <= 65536:
-            raise Error("field length {} looks insane".format(length))
+            raise Error(f"field length {length} looks insane")
         type_id = first_block[4]
         rest = length - (block_size - 5)
         data = first_block[5 : length + 5]
@@ -261,11 +308,11 @@ class PwsafeV3Reader(PwsafeV3Base):
         self._hmac.update(data)
         if type_id in field_types:
             return field_types[type_id].from_bytes(data)
-        name = "RawField{}".format(type_id)
-        field_types[type_id] = T = RawField.subclass(name, type_id)
+        name = f"RawField{type_id}"
+        field_types[type_id] = T = subclass(RawField, name, type_id)
         return T.from_bytes(data)
 
-    def _read_block(self, block_size):
+    def _read_block(self, block_size: int) -> bytes:
         block = self._fp.read(block_size)
         if block == self.EOF:
             raise _EOF()
@@ -273,7 +320,7 @@ class PwsafeV3Reader(PwsafeV3Base):
         self._iv = block
         return data
 
-    def _check_digest(self):
+    def _check_digest(self) -> None:
         digest = self._fp.read(self._hmac.block_size)
         if not hmac.compare_digest(self._hmac.digest(), digest):
             raise DigestError("invalid hmac")
@@ -283,7 +330,7 @@ class PwsafeV3Writer(PwsafeV3Base):
 
     _eof_written = False
 
-    def __init__(self, fp, key, iterations=None):
+    def __init__(self, fp: BinaryIO, key: bytes, iterations: int | None = None):
         self._fp = fp
         if iterations is None or iterations < self.MIN_HASH_ITERATIONS:
             iterations = self.MIN_HASH_ITERATIONS
@@ -303,16 +350,16 @@ class PwsafeV3Writer(PwsafeV3Base):
         header = Header(self.TAG, salt, iterations, hp1, b1, b2, b3, b4, iv)
         fp.write(header.to_bytes())
 
-    def _write_eof(self):
+    def _write_eof(self) -> None:
         assert not self._eof_written, "writer closed"
         self._fp.write(self.EOF)
         self._fp.write(self._hmac.digest())
         self._eof_written = True
 
-    def close(self):
+    def close(self) -> None:
         self._write_eof()
 
-    def _write_field(self, field, block_size=16):
+    def _write_field(self, field: Field, block_size: int = 16) -> None:
         raw = field.to_bytes()
         self._hmac.update(raw)
         length = len(raw)
@@ -331,7 +378,7 @@ class PwsafeV3Writer(PwsafeV3Base):
             self._fp.write(enc)
             self._iv = enc
 
-    def write_record(self, fields):
+    def write_record(self, fields: Iterable[Field]) -> None:
         for field in fields:
             self._write_field(field)
             if field is END:
@@ -340,181 +387,173 @@ class PwsafeV3Writer(PwsafeV3Base):
             self._write_field(END)
 
 
-class AField(metaclass=abc.ABCMeta):
+def subclass(cls: type[Field], name: str, type_id: int, **kwargs: Any) -> type[Field]:
+    attrs = {"type_id": type_id, "__slots__": (), "__module__": __name__, **kwargs}
+    T = type(name, (cls,), attrs)
+    return T
 
-    __slots__ = ()
 
-    @property
-    @abc.abstractmethod
-    def type_id(self):
-        raise NotImplementedError()
+@runtime_checkable
+class Field(Protocol):
+    type_id: ClassVar[int] = 0xDF
 
-    @abc.abstractmethod
-    def to_bytes(self):
-        raise NotImplementedError()
-
-    @classmethod
-    @abc.abstractmethod
-    def from_bytes(cls, raw):
-        raise NotImplementedError()
+    def to_bytes(self) -> bytes: ...
 
     @classmethod
-    def subclass(cls, name, type_id):
-        attrs = {"type_id": type_id, "__slots__": (), "__module__": __name__}
-        T = type(name, (cls,), attrs)
-        return T
-
-    def __repr__(self):
-        return "{0.__class__.__name__}({1})".format(self, super().__repr__())
+    def from_bytes(cls, raw: bytes) -> Self: ...
 
 
-class TextField(AField, str):
-
-    __slots__ = ()
+@dataclass
+class TextField(Field):
+    value: str
 
     @classmethod
-    def from_bytes(cls, raw):
-        return cls(raw, encoding="utf-8")
+    def from_bytes(cls, raw: bytes) -> Self:
+        return cls(str(raw, encoding="utf-8"))
 
-    def to_bytes(self):
-        return self.encode("utf-8")
+    def to_bytes(self) -> bytes:
+        return self.value.encode("utf-8")
 
-
-class TimeField(AField, datetime.datetime):
-
-    __slots__ = ()
-
-    @classmethod
-    def from_bytes(cls, raw):
-        return cls.fromtimestamp(int.from_bytes(raw, byteorder="little"))
-
-    def to_bytes(self):
-        return int(self.timestamp()).to_bytes(4, byteorder="little")
-
-    def __repr__(self):
-        return datetime.datetime.__repr__(self)
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({repr(self.value)})"
 
 
-class IntField(AField, int):
-
-    __slots__ = ()
+@dataclass
+class TimeField(Field):
+    value: datetime.datetime
 
     @classmethod
-    def subclass(cls, name, type_id, size):
-        T = super().subclass(name, type_id)
-        T.size = size
-        return T
+    def from_bytes(cls, raw: bytes) -> Self:
+        timestamp = int.from_bytes(raw, byteorder="little")
+        return cls(datetime.datetime.fromtimestamp(timestamp))
+
+    def to_bytes(self) -> bytes:
+        return int(self.value.timestamp()).to_bytes(4, byteorder="little")
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({repr(self.value)})"
+
+
+@dataclass
+class IntField(Field):
+    size: ClassVar[int]
+    value: int
 
     @classmethod
-    def from_bytes(cls, raw):
+    def from_bytes(cls, raw: bytes) -> Self:
         return cls(int.from_bytes(raw, byteorder="little"))
 
-    def to_bytes(self):
-        return int(self).to_bytes(self.size, byteorder="little")
+    def to_bytes(self) -> bytes:
+        return self.value.to_bytes(self.size, byteorder="little")
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({repr(self.value)})"
 
 
-class UUID(AField, uuid.UUID):
-
-    __slots__ = ()
-    type_id = 0x01
-
-    @classmethod
-    def uuid4(cls):
-        return cls(bytes=os.urandom(16), version=4)
-
-    @classmethod
-    def from_bytes(cls, raw):
-        return cls(bytes_le=raw)
-
-    def to_bytes(self):
-        return self.bytes_le
-
-    def __repr__(self):
-        return uuid.UUID.__repr__(self)
-
-
-class RawField(AField, bytes):
-
-    __slots__ = ()
+@dataclass
+class UuidField(Field):
+    type_id: ClassVar[int] = 0x01
+    value: uuid.UUID
 
     @classmethod
-    def from_bytes(cls, raw):
+    def uuid4(cls) -> Self:
+        return cls(uuid.UUID(bytes=os.urandom(16), version=4))
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> Self:
+        return cls(uuid.UUID(bytes_le=raw))
+
+    def to_bytes(self) -> bytes:
+        return self.value.bytes_le
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({repr(self.value)})"
+
+
+@dataclass
+class RawField(Field):
+    value: bytes
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> Self:
         return cls(raw)
 
-    def to_bytes(self):
-        return self
+    def to_bytes(self) -> bytes:
+        return self.value
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({repr(self.value)})"
 
 
-class End(AField):
-
-    __slots__ = ()
-    type_id = 0xFF
+@dataclass
+class End(Field):
+    type_id: ClassVar[int] = 0xFF
 
     @classmethod
-    def from_bytes(cls, raw):
+    def from_bytes(cls, raw: bytes) -> End:
         return END
 
-    def to_bytes(self):
+    def to_bytes(self) -> bytes:
         return b""
 
-    def __repr__(self):
-        return "{0.__class__.__name__}()".format(self)
+    def __repr__(self) -> str:
+        return "End()"
 
 
-Version = IntField.subclass("Version", 0x00, 2)
-NonDefaultPreferences = TextField.subclass("NonDefaultPreferences", 0x02)
-TreeDisplayStatus = TextField.subclass("TreeDisplayStatus", 0x03)
-LastSave = TextField.subclass("LastSave", 0x04)
-WhoLastSave = TextField.subclass("WhoLastSave", 0x05)
-WhatLastSave = TextField.subclass("WhatLastSave", 0x06)
-LastSavedByUser = TextField.subclass("LastSavedByUser", 0x07)
-LastSavedOnHost = TextField.subclass("LastSavedOnHost", 0x08)
-DatabaseName = TextField.subclass("DatabaseName", 0x0A)
-DatabaseDescription = TextField.subclass("DatabaseDescription", 0x0A)
-DatabaseFilters = TextField.subclass("DatabaseFilters", 0x0B)
+Version = subclass(IntField, "Version", 0x00, size=2)
+NonDefaultPreferences = subclass(TextField, "NonDefaultPreferences", 0x02)
+TreeDisplayStatus = subclass(TextField, "TreeDisplayStatus", 0x03)
+LastSave = subclass(TextField, "LastSave", 0x04)
+WhoLastSave = subclass(TextField, "WhoLastSave", 0x05)
+WhatLastSave = subclass(TextField, "WhatLastSave", 0x06)
+LastSavedByUser = subclass(TextField, "LastSavedByUser", 0x07)
+LastSavedOnHost = subclass(TextField, "LastSavedOnHost", 0x08)
+DatabaseName = subclass(TextField, "DatabaseName", 0x0A)
+DatabaseDescription = subclass(TextField, "DatabaseDescription", 0x0A)
+DatabaseFilters = subclass(TextField, "DatabaseFilters", 0x0B)
 # 0x0c to 0x0e are reserved
-RecentlyUsedEntries = TextField.subclass("RecentlyUsedEntries", 0x0F)
-NamedPasswordPolicies = TextField.subclass("NamedPasswordPolicies", 0x10)
-EmptyGroups = TextField.subclass("EmptyGroups", 0x11)
-Yubico = TextField.subclass("Yubico", 0x12)
+RecentlyUsedEntries = subclass(TextField, "RecentlyUsedEntries", 0x0F)
+NamedPasswordPolicies = subclass(TextField, "NamedPasswordPolicies", 0x10)
+EmptyGroups = subclass(TextField, "EmptyGroups", 0x11)
+Yubico = subclass(TextField, "Yubico", 0x12)
 END = End()
 # record fields
-Group = TextField.subclass("Group", 0x02)
-Title = TextField.subclass("Title", 0x03)
-Username = TextField.subclass("Username", 0x04)
-Note = TextField.subclass("Note", 0x05)
-Password = TextField.subclass("Password", 0x06)
-CreationTime = TimeField.subclass("CreationTime", 0x07)
-PasswordModificationTime = TimeField.subclass("PasswordModificationTime", 0x08)
-LastAccessTime = TimeField.subclass("LastAccessTime", 0x09)
-PasswordExpiryTime = TimeField.subclass("PasswordExpiryTime", 0x0A)
-# _Reserved = IntField.subclass('_Reserved', 0x0b, 4)
-LastModificationTime = TimeField.subclass("LastModificationTime", 0x0C)
-Url = TextField.subclass("Url", 0x0D)
-Autotype = TextField.subclass("Autotype", 0x0E)
-PasswordHistory = TextField.subclass("PasswordHistory", 0x0F)
-PasswordPolicy = TextField.subclass("PasswordPolicy", 0x10)
-PasswordExpiryInterval = IntField.subclass("PasswordExpiryInterval", 0x11, 4)
-RunCommand = TextField.subclass("RunCommand", 0x12)
-DoubleClickAction = IntField.subclass("DoubleClickAction", 0x13, 2)
-EmailAddress = TextField.subclass("EmailAddress", 0x14)
-ProtectedEntry = IntField.subclass("ProtectedEntry", 0x15, 1)
-OwnSymbolsPassword = TextField.subclass("OwnSymbolsPassword", 0x16)
-ShiftDoubleClickAction = IntField.subclass("ShiftDoubleClickAction", 0x17, 2)
-PasswordPolicyName = TextField.subclass("PasswordPolicyName", 0x18)
-EntryKeyboardShortcut = IntField.subclass("EntryKeyboardShortcut", 0x19, 4)
-# _Reserved = UUID.subclass('_Reserved', 0x1a)
-TwoFactorKey = RawField.subclass("TwoFactorKey", 0x1B)
-CreditCardNumber = TextField.subclass("CreditCardNumber", 0x1C)
-CreditCardExpiration = TextField.subclass("CreditCardExpiration", 0x1D)
-CreditCardVerification = TextField.subclass("CreditCardVerification", 0x1E)
-CreditCardPin = TextField.subclass("CreditCardPin", 0x1F)
-QRCode = TextField.subclass("QRCode", 0x20)
-Unknown = RawField.subclass("Unknown", 0xDF)
+Group = subclass(TextField, "Group", 0x02)
+Title = subclass(TextField, "Title", 0x03)
+Username = subclass(TextField, "Username", 0x04)
+Note = subclass(TextField, "Note", 0x05)
+Password = subclass(TextField, "Password", 0x06)
+CreationTime = subclass(TimeField, "CreationTime", 0x07)
+PasswordModificationTime = subclass(TimeField, "PasswordModificationTime", 0x08)
+LastAccessTime = subclass(TimeField, "LastAccessTime", 0x09)
+PasswordExpiryTime = subclass(TimeField, "PasswordExpiryTime", 0x0A)
+# _Reserved = subclass(IntField, '_Reserved', 0x0b, size=4)
+LastModificationTime = subclass(TimeField, "LastModificationTime", 0x0C)
+Url = subclass(TextField, "Url", 0x0D)
+Autotype = subclass(TextField, "Autotype", 0x0E)
+PasswordHistory = subclass(TextField, "PasswordHistory", 0x0F)
+PasswordPolicy = subclass(TextField, "PasswordPolicy", 0x10)
+PasswordExpiryInterval = subclass(IntField, "PasswordExpiryInterval", 0x11, size=4)
+RunCommand = subclass(TextField, "RunCommand", 0x12)
+DoubleClickAction = subclass(IntField, "DoubleClickAction", 0x13, size=2)
+EmailAddress = subclass(TextField, "EmailAddress", 0x14)
+ProtectedEntry = subclass(IntField, "ProtectedEntry", 0x15, size=1)
+OwnSymbolsPassword = subclass(TextField, "OwnSymbolsPassword", 0x16)
+ShiftDoubleClickAction = subclass(IntField, "ShiftDoubleClickAction", 0x17, size=2)
+PasswordPolicyName = subclass(TextField, "PasswordPolicyName", 0x18)
+EntryKeyboardShortcut = subclass(IntField, "EntryKeyboardShortcut", 0x19, size=4)
+# _Reserved = subclass(UuidField, '_Reserved', 0x1a)
+TwoFactorKey = subclass(RawField, "TwoFactorKey", 0x1B)
+CreditCardNumber = subclass(TextField, "CreditCardNumber", 0x1C)
+CreditCardExpiration = subclass(TextField, "CreditCardExpiration", 0x1D)
+CreditCardVerification = subclass(TextField, "CreditCardVerification", 0x1E)
+CreditCardPin = subclass(TextField, "CreditCardPin", 0x1F)
+QRCode = subclass(TextField, "QRCode", 0x20)
+Unknown = subclass(RawField, "Unknown", 0xDF)
 
-HEADER_TYPES = (
+HEADER_TYPES: tuple[type[Field], ...] = (
     Version,
-    UUID,
+    UuidField,
     NonDefaultPreferences,
     TreeDisplayStatus,
     LastSave,
@@ -531,8 +570,8 @@ HEADER_TYPES = (
     Yubico,
     End,
 )
-RECORD_TYPES = (
-    UUID,
+RECORD_TYPES: tuple[type[Field], ...] = (
+    UuidField,
     Group,
     Title,
     Username,
